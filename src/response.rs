@@ -52,7 +52,8 @@ pub enum ReadResult {
     Doctor(Doctor),
     Audit(Vec<AuditItem>),
 }
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum MutationResult {
     Created {
         id: i64,
@@ -83,7 +84,7 @@ pub enum MutationResult {
         repair: Option<(i64, &'static str)>,
     },
 }
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct MutationEffects {
     pub staged: bool,
     pub backup: Option<PathBuf>,

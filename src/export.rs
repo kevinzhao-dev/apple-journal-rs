@@ -9,8 +9,12 @@ use anyhow::Result;
 use std::{fs, path::Path};
 
 pub fn run(path: &Path, request: &ExportRequest) -> Result<Response> {
+    save(&load(path)?, request)
+}
+
+pub(crate) fn load(path: &Path) -> Result<Vec<EntryDetail>> {
     let snapshot = store::Snapshot::new(path)?;
-    let entries = model::fetch(&snapshot.db, false)?
+    model::fetch(&snapshot.db, false)?
         .into_iter()
         .map(|entry| {
             Ok(EntryDetail {
@@ -18,7 +22,10 @@ pub fn run(path: &Path, request: &ExportRequest) -> Result<Response> {
                 entry,
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()
+}
+
+pub(crate) fn save(entries: &[EntryDetail], request: &ExportRequest) -> Result<Response> {
     fs::create_dir_all(&request.dir)?;
     let output = match request.format {
         ExportFormat::Json => {
@@ -27,7 +34,7 @@ pub fn run(path: &Path, request: &ExportRequest) -> Result<Response> {
             output
         }
         ExportFormat::Md => {
-            for e in &entries {
+            for e in entries {
                 let (date, id) = (e.entry.date.as_deref().unwrap_or(""), e.entry.id);
                 let slug = e
                     .entry

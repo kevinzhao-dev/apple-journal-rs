@@ -48,6 +48,13 @@ pub struct PreparedText {
 }
 impl PreparedText {
     pub fn read(source: &TextSource) -> Result<Option<Self>> {
+        if source.ignore_stdin
+            && source.body.is_none()
+            && source.body_file.is_none()
+            && source.body_rtf.is_none()
+        {
+            return Ok(None);
+        }
         if let Some(path) = &source.body_rtf {
             let rtf = fs::read(path)?;
             anyhow::ensure!(

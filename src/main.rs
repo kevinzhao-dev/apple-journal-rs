@@ -3,6 +3,10 @@ use clap::Parser;
 use journal_rs::{cli::Cli, execute, presentation};
 use std::io::Write;
 fn run(cli: Cli) -> Result<()> {
+    if matches!(cli.command, journal_rs::cli::Command::Mcp) {
+        return tokio::runtime::Runtime::new()?
+            .block_on(journal_rs::mcp::serve(cli.database_path()?));
+    }
     let response = execute(&cli.database_path()?, &cli.command)?;
     let output = presentation::format(&response, &cli.command)?;
     std::io::stderr().lock().write_all(&output.stderr)?;

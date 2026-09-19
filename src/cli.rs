@@ -27,6 +27,8 @@ impl Cli {
 }
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Serve MCP journal tools over stdin/stdout.
+    Mcp,
     List(ListRequest),
     Show(ShowRequest),
     Search(SearchRequest),
@@ -69,6 +71,9 @@ pub struct ListRequest {
     pub until: Option<f64>,
     #[arg(long)]
     pub include_empty: bool,
+    /// Journal name or numeric ID from journals.
+    #[arg(long)]
+    pub journal: Option<String>,
 }
 #[derive(Debug, Args)]
 pub struct ShowRequest {
@@ -82,6 +87,13 @@ pub struct SearchRequest {
     pub query: String,
     #[command(flatten)]
     pub output: ListOptions,
+    #[arg(long, value_parser=crate::store::parse_date)]
+    pub since: Option<f64>,
+    #[arg(long, value_parser=crate::store::parse_date)]
+    pub until: Option<f64>,
+    /// Journal name or numeric ID from journals.
+    #[arg(long)]
+    pub journal: Option<String>,
 }
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ExportFormat {
@@ -114,6 +126,9 @@ pub struct SandboxRequest {
 }
 #[derive(Debug, Args, Default)]
 pub struct TextSource {
+    /// Embedded transports own stdin and must supply text explicitly.
+    #[arg(skip)]
+    pub ignore_stdin: bool,
     #[arg(long, conflicts_with_all=["body_file","body_rtf"])]
     pub body: Option<String>,
     #[arg(long, value_parser=parse_path, conflicts_with="body_rtf")]
@@ -237,6 +252,9 @@ pub struct CreateRequest {
 #[derive(Debug, Args)]
 pub struct EditRequest {
     pub id: i64,
+    /// Embedded callers can require active state at transaction time.
+    #[arg(skip)]
+    pub require_active: bool,
     #[command(flatten)]
     pub entry: EntryOptions,
     #[command(flatten)]

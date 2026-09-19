@@ -378,6 +378,14 @@ impl<'a> Mutation<'a> {
         a: &EditRequest,
     ) -> Result<MutationResult> {
         let id = a.id;
+        // Validate after BEGIN IMMEDIATE: an earlier MCP snapshot may be stale.
+        if a.require_active {
+            let active: bool = self.db.query_row(
+                "select exists(select 1 from ZJOURNALENTRYMO where Z_PK=? and coalesce(ZISFULLYREMOVED,0)=0 and coalesce(ZRECENTLYDELETED,0)=0 and ZENTRYDATE is not null)",
+                [id], |row| row.get(0),
+            )?;
+            anyhow::ensure!(active, "no active entry with id {id}");
+        }
         struct State {
             uuid: Vec<u8>,
             merge: Option<Vec<u8>>,

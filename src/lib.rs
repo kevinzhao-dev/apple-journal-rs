@@ -4,9 +4,11 @@ mod codec;
 mod export;
 mod input;
 mod markdown;
+pub mod mcp;
 pub mod model;
 mod mutation;
 pub mod presentation;
+mod query;
 mod read;
 pub mod response;
 mod store;
@@ -20,6 +22,7 @@ pub fn execute(path: &Path, command: &Command) -> Result<Response> {
     // Normalize once for both direct library callers and CLI callers.
     let path = std::path::absolute(path)?;
     match command {
+        Command::Mcp => anyhow::bail!("use mcp::serve to start the MCP transport"),
         Command::Sandbox(a) => Ok(Response::Sandbox(store::sandbox(a)?)),
         Command::Export(a) => export::run(&path, a),
         Command::Render(_)

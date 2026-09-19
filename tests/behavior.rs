@@ -681,3 +681,458 @@ fn human_read_commands_preserve_content_and_attachment_diagnostics() {
     let deleted = text(&["deleted"]);
     assert!(deleted.contains("旅途") && deleted.contains("untitled entry"));
 }
+
+struct McpClient {
+    child: std::process::Child,
+    input: Option<std::process::ChildStdin>,
+    messages: std::sync::mpsc::Receiver<Value>,
+    next_id: u64,
+}
+impl McpClient {
+    fn start(path: &Path) -> Self {
+        Self::start_with_home(path, None)
+    }
+    fn start_with_home(path: &Path, home: Option<&Path>) -> Self {
+        use std::io::BufRead;
+        let mut command = Command::new(BIN);
+        if let Some(home) = home {
+            command.env("HOME", home);
+        }
+        let mut child = command
+            .args(["--db", path.to_str().unwrap(), "mcp"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take();
+        let output = child.stdout.take().unwrap();
+        let (send, messages) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(output).lines() {
+                let value = serde_json::from_str(&line.unwrap()).unwrap();
+                if send.send(value).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut client = Self {
+            child,
+            input,
+            messages,
+            next_id: 0,
+        };
+        let init = client.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-03-26", "capabilities": {},
+                "clientInfo": {"name":"journal-tests", "version":"1"}
+            }),
+        );
+        assert!(
+            init["result"]["capabilities"]["tools"].is_object(),
+            "{init}"
+        );
+        client.send(json!({"jsonrpc":"2.0", "method":"notifications/initialized"}));
+        client
+    }
+    fn send(&mut self, value: Value) {
+        use std::io::Write;
+        let input = self.input.as_mut().unwrap();
+        writeln!(input, "{value}").unwrap();
+        input.flush().unwrap();
+    }
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        self.next_id += 1;
+        self.send(json!({"jsonrpc":"2.0", "id":self.next_id, "method":method, "params":params}));
+        loop {
+            let message = self
+                .messages
+                .recv_timeout(std::time::Duration::from_secs(15))
+                .unwrap();
+            if message["id"] == self.next_id {
+                return message;
+            }
+        }
+    }
+    fn call(&mut self, name: &str, arguments: Value) -> Value {
+        self.request("tools/call", json!({"name":name,"arguments":arguments}))
+    }
+    fn data(&mut self, name: &str, arguments: Value) -> Value {
+        let response = self.call(name, arguments);
+        assert!(response.get("error").is_none(), "{response}");
+        assert_ne!(response["result"]["isError"], true, "{response}");
+        response["result"]["structuredContent"].clone()
+    }
+}
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        self.input.take();
+        // Bound cleanup even when a protocol assertion fails.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn mcp_reads_filters_pages_errors_and_never_writes() {
+    let f = Fixture::new();
+    for (date, title, text) in [
+        ("2024-09-10T12:00:00", "Earlier", "Moving felt difficult"),
+        ("2025-09-30T23:59:59", "Food", "拉麵 café"),
+        ("2025-09-30T23:59:59", "Trip", "拉麵 on holiday"),
+        ("2025-10-01T00:00:00", "Boundary", "October"),
+        ("2025-09-01", "Deleted", "not visible"),
+    ] {
+        f.ok(&["write", "--date", date, "--title", title, "--body", text]);
+    }
+    f.db().execute_batch("update ZJOURNALENTRYMO set ZRECENTLYDELETED=1 where Z_PK=5;
+        insert into ZJOURNALMO(Z_PK,Z_ENT,ZUSERDELETED,ZMERGEABLEATTRIBUTES) values(2,6,0,X'637264740054726176656C007469746C6500');
+        insert into Z_5JOURNALS(Z_5ENTRIES,Z_6JOURNALS) values(3,2);").unwrap();
+    let before = fs::read(f.path()).unwrap();
+    let mut mcp = McpClient::start(&f.path());
+    let tools = mcp.request("tools/list", json!({}));
+    let tools = tools["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 7);
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        let mutation = ["write_entry", "edit_entry", "export_entries"].contains(&name);
+        assert_eq!(tool["annotations"]["readOnlyHint"], !mutation);
+        assert_eq!(tool["annotations"]["destructiveHint"], name == "edit_entry");
+    }
+    let first = mcp.data(
+        "list_entries",
+        json!({"since":"2025-09-01", "until":"2025-10-01", "limit":1}),
+    );
+    assert_eq!(first["total"], 2);
+    assert_eq!(first["entries"][0]["id"], 3);
+    assert_eq!(first["entries"][0]["journal_ids"], json!([2]));
+    assert_eq!(first["next_offset"], 1);
+    let second = mcp.data(
+        "list_entries",
+        json!({"since":"2025-09-01", "until":"2025-10-01", "limit":1, "offset":1}),
+    );
+    assert_eq!(second["entries"][0]["id"], 2);
+    assert_eq!(second["entries"][0]["journal_ids"], json!([1]));
+    assert!(second["next_offset"].is_null());
+    assert_eq!(
+        mcp.data("search_entries", json!({"query":"拉麵", "journal":"2"}))["total"],
+        1
+    );
+    assert_eq!(
+        mcp.data("search_entries", json!({"query":"CAFÉ", "journal":"1"}))["total"],
+        1
+    );
+    assert_eq!(
+        mcp.data("search_entries", json!({"query":"absent"}))["total"],
+        0
+    );
+    assert_eq!(
+        mcp.data("list_entries", json!({"offset":100}))["entries"],
+        json!([])
+    );
+    let detail = mcp.data("get_entry", json!({"id":3}));
+    assert_eq!(detail["text"], "拉麵 on holiday");
+    assert_eq!(detail["journal_ids"], json!([2]));
+    assert!(detail["assets"].is_array());
+    assert_eq!(
+        mcp.data("list_journals", json!({}))["journals"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    for (tool, args) in [
+        ("get_entry", json!({"id":5})),
+        ("get_entry", json!({"id":999})),
+        ("list_entries", json!({"limit":0})),
+        ("list_entries", json!({"limit":101})),
+        ("list_entries", json!({"since":"bad"})),
+        (
+            "list_entries",
+            json!({"since":"2026-01-01", "until":"2025-01-01"}),
+        ),
+        ("list_entries", json!({"journal":"missing"})),
+        ("search_entries", json!({"query":" "})),
+        ("search_entries", json!({})),
+    ] {
+        assert_eq!(mcp.call(tool, args)["result"]["isError"], true);
+    }
+    let bad = mcp.call("get_entry", json!({"id":3,"db":"/tmp/another.sqlite"}));
+    assert!(bad.get("error").is_some() || bad["result"]["isError"] == true);
+    assert!(
+        mcp.call("write", json!({"body":"forbidden"}))
+            .get("error")
+            .is_some()
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), before);
+
+    // The CLI shares filters but retains its existing inclusive upper date boundary.
+    assert_eq!(
+        f.json(&[
+            "list",
+            "--since",
+            "2025-09-01",
+            "--until",
+            "2025-10-01",
+            "--json"
+        ])
+        .as_array()
+        .unwrap()
+        .len(),
+        3
+    );
+    assert_eq!(
+        f.json(&[
+            "search",
+            "拉麵",
+            "--journal",
+            "2",
+            "--since",
+            "2025-09-01",
+            "--until",
+            "2025-10-01",
+            "--json"
+        ])[0]["id"],
+        3
+    );
+    assert_eq!(
+        f.json(&["list", "--journal", "1", "--json"])
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn mcp_missing_database_returns_tool_error_and_stays_alive() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut mcp = McpClient::start(&dir.path().join("missing.sqlite"));
+    assert_eq!(
+        mcp.call("list_entries", json!({}))["result"]["isError"],
+        true
+    );
+    assert!(mcp.request("tools/list", json!({}))["result"]["tools"].is_array());
+    assert!(!dir.path().join("missing.sqlite").exists());
+}
+
+#[test]
+fn mcp_text_mutations_preview_preserve_fields_and_enforce_guards() {
+    let f = Fixture::new();
+    let original = fs::read(f.path()).unwrap();
+    let mut mcp = McpClient::start(&f.path());
+    let preview = mcp.data(
+        "write_entry",
+        json!({"title":"週末", "body":"**散步**", "markdown":true}),
+    );
+    assert_eq!(preview["result"]["status"], "dry_run");
+    assert_eq!(fs::read(f.path()).unwrap(), original);
+    let created = mcp.data("write_entry", json!({"title":"週末", "body":"**散步**", "markdown":true, "date":"2025-09-18", "dry_run":false}));
+    assert_eq!(created["result"]["status"], "created");
+    let id = created["result"]["id"].as_i64().unwrap();
+    assert_eq!(mcp.data("get_entry", json!({"id":id}))["text"], "散步");
+    let before_edit = fs::read(f.path()).unwrap();
+    assert_eq!(
+        mcp.data("edit_entry", json!({"id":id,"title":"週末回憶"}))["result"]["status"],
+        "dry_run"
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), before_edit);
+    mcp.data(
+        "edit_entry",
+        json!({"id":id,"title":"週末回憶","bookmark":true,"dry_run":false}),
+    );
+    let entry = mcp.data("get_entry", json!({"id":id}));
+    assert_eq!(entry["title"], "週末回憶");
+    assert_eq!(entry["text"], "散步"); // Omitted body must not consume protocol stdin or clear text.
+    assert_eq!(entry["bookmarked"], true);
+    mcp.data(
+        "edit_entry",
+        json!({"id":id,"body":"","bookmark":false,"dry_run":false}),
+    );
+    let entry = mcp.data("get_entry", json!({"id":id}));
+    assert_eq!(entry["text"], "");
+    assert_eq!(entry["bookmarked"], false);
+    assert_eq!(entry["title"], "週末回憶");
+    let title_only = mcp.data("write_entry", json!({"title":"只有標題","dry_run":false}));
+    assert_eq!(title_only["result"]["status"], "created");
+    for (name, args) in [
+        ("write_entry", json!({})),
+        ("write_entry", json!({"body":"x","date":"bad"})),
+        (
+            "write_entry",
+            json!({"body":"x","journal":"missing","dry_run":false}),
+        ),
+        ("edit_entry", json!({"id":999,"title":"x"})),
+        ("edit_entry", json!({"id":id})),
+    ] {
+        assert_eq!(mcp.call(name, args)["result"]["isError"], true);
+    }
+    f.db()
+        .execute(
+            "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=X'01' where Z_PK=?",
+            [id],
+        )
+        .unwrap();
+    assert_eq!(
+        mcp.call(
+            "edit_entry",
+            json!({"id":id,"body":"no bypass","dry_run":false})
+        )["result"]["isError"],
+        true
+    );
+    mcp.data(
+        "edit_entry",
+        json!({"id":id,"bookmark":true,"dry_run":false}),
+    );
+    f.db()
+        .execute(
+            "update ZJOURNALENTRYMO set ZRECENTLYDELETED=1 where Z_PK=?",
+            [id],
+        )
+        .unwrap();
+    assert_eq!(
+        mcp.call(
+            "edit_entry",
+            json!({"id":id,"bookmark":false,"dry_run":false})
+        )["result"]["isError"],
+        true
+    );
+}
+
+#[test]
+fn mcp_exports_preview_and_refuse_overwrite() {
+    let f = Fixture::new();
+    f.ok(&["write", "--title", "旅程", "--body", "日記內容"]);
+    let before = fs::read(f.path()).unwrap();
+    let mut mcp = McpClient::start(&f.path());
+    for format in ["json", "md"] {
+        let dir = f.dir.path().join(format);
+        let preview = mcp.data("export_entries", json!({"dir":dir,"format":format}));
+        assert_eq!(preview["dry_run"], true);
+        assert_eq!(preview["entries"], 1);
+        assert!(!dir.exists());
+        let done = mcp.data(
+            "export_entries",
+            json!({"dir":dir,"format":format,"dry_run":false}),
+        );
+        assert_eq!(done["dry_run"], false);
+        let file = fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        let content = fs::read_to_string(&file).unwrap();
+        assert!(content.contains("日記內容"));
+        assert_eq!(
+            mcp.call(
+                "export_entries",
+                json!({"dir":dir,"format":format,"dry_run":false})
+            )["result"]["isError"],
+            true
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), content);
+    }
+    let link = f.dir.path().join("dangling");
+    std::os::unix::fs::symlink(f.dir.path().join("absent"), &link).unwrap();
+    assert_eq!(
+        mcp.call(
+            "export_entries",
+            json!({"dir":link,"format":"json","dry_run":false})
+        )["result"]["isError"],
+        true
+    );
+    assert_eq!(
+        mcp.call("export_entries", json!({"dir":"relative","format":"json"}))["result"]["isError"],
+        true
+    );
+    assert_eq!(fs::read(f.path()).unwrap(), before);
+}
+
+#[test]
+fn mcp_live_write_requires_explicit_opt_in_even_through_an_alias() {
+    let f = Fixture::new();
+    let home = f.dir.path().join("home");
+    let real = home.join("Library/Group Containers/group.com.apple.moments/Library/moments.sqlite");
+    fs::create_dir_all(real.parent().unwrap()).unwrap();
+    fs::copy(f.path(), &real).unwrap();
+    let alias = f.dir.path().join("alias.sqlite");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let before = fs::read(&real).unwrap();
+    let mut mcp = McpClient::start_with_home(&alias, Some(&home));
+    mcp.data("write_entry", json!({"body":"preview"}));
+    let response = mcp.call("write_entry", json!({"body":"must refuse","dry_run":false}));
+    assert_eq!(response["result"]["isError"], true);
+    assert!(
+        response["result"]["structuredContent"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("without --live")
+    );
+    // With live opted in but no risk acceptance, either the running-app or risk guard refuses.
+    assert_eq!(
+        mcp.call(
+            "write_entry",
+            json!({"body":"must refuse","dry_run":false,"live":true})
+        )["result"]["isError"],
+        true
+    );
+    assert_eq!(fs::read(&real).unwrap(), before);
+    assert!(!home.join(".config/journal-rs/risk-accepted").exists());
+}
+
+#[test]
+fn cli_equal_date_order_is_preserved_while_mcp_pages_are_deterministic() {
+    let f = Fixture::new();
+    for body in ["match first", "match second", "match third"] {
+        f.ok(&["write", "--body", body, "--date", "2025-09-18"]);
+    }
+    for args in [vec!["list", "--json"], vec!["search", "match", "--json"]] {
+        let rows = f.json(&args);
+        let ids: Vec<_> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        let mut limited = args;
+        limited.extend(["--limit", "1"]);
+        assert_eq!(f.json(&limited)[0]["id"], 1);
+    }
+    let mut mcp = McpClient::start(&f.path());
+    for offset in 0..3 {
+        let page = mcp.data("list_entries", json!({"limit":1,"offset":offset}));
+        assert_eq!(page["entries"][0]["id"], 3 - offset);
+    }
+}
+
+#[test]
+fn active_edit_rechecks_state_after_an_earlier_read() {
+    use clap::Parser;
+    use journal_rs::cli::{Cli, Command as Request};
+    let f = Fixture::new();
+    f.ok(&["write", "--body", "original"]);
+    assert_eq!(f.json(&["list", "--json"])[0]["id"], 1);
+    // Another connection commits a deletion after the caller has read the entry.
+    // Exercise the transaction guard directly, without MCP's snapshot preflight.
+    for update in [
+        "ZRECENTLYDELETED=1",
+        "ZRECENTLYDELETED=0,ZISFULLYREMOVED=1",
+        "ZISFULLYREMOVED=0,ZENTRYDATE=NULL",
+    ] {
+        f.db()
+            .execute(
+                &format!("update ZJOURNALENTRYMO set {update} where Z_PK=1"),
+                [],
+            )
+            .unwrap();
+        let mut cli =
+            Cli::try_parse_from(["journal-rs", "edit", "1", "--body", "must not be written"])
+                .unwrap();
+        if let Request::Edit(ref mut edit) = cli.command {
+            edit.require_active = true;
+        }
+        let before = fs::read(f.path()).unwrap();
+        let error = journal_rs::execute(&f.path(), &cli.command).unwrap_err();
+        assert!(error.to_string().contains("no active entry"), "{error:#}");
+        assert_eq!(fs::read(f.path()).unwrap(), before);
+        assert_eq!(f.json(&["show", "1", "--json"])["text"], "original");
+    }
+}

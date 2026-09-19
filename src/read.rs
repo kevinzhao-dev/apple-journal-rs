@@ -12,26 +12,32 @@ pub fn run(path: &Path, command: &Command) -> Result<ReadResult> {
     let db = &snapshot.db;
     Ok(match command {
         Command::List(a) => {
-            let mut entries = model::fetch(db, a.include_empty)?
-                .into_iter()
-                .filter(|e| {
-                    a.since.is_none_or(|n| e.timestamp.unwrap() >= n)
-                        && a.until.is_none_or(|n| e.timestamp.unwrap() <= n)
-                })
-                .collect::<Vec<_>>();
+            let mut entries = crate::query::entries(
+                db,
+                crate::query::Filter {
+                    since: a.since,
+                    until: a.until,
+                    journal: a.journal.as_deref(),
+                    include_empty: a.include_empty,
+                    ..Default::default()
+                },
+            )?;
             if let Some(n) = a.output.limit {
                 entries.truncate(n);
             }
             ReadResult::Entries(entries)
         }
         Command::Search(a) => {
-            let q = a.query.to_lowercase();
-            let mut entries = model::fetch(db, false)?
-                .into_iter()
-                .filter(|e| {
-                    e.text.to_lowercase().contains(&q) || e.title.to_lowercase().contains(&q)
-                })
-                .collect::<Vec<_>>();
+            let mut entries = crate::query::entries(
+                db,
+                crate::query::Filter {
+                    since: a.since,
+                    until: a.until,
+                    journal: a.journal.as_deref(),
+                    text: Some(&a.query),
+                    ..Default::default()
+                },
+            )?;
             if let Some(n) = a.output.limit {
                 entries.truncate(n);
             }
