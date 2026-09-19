@@ -1,0 +1,41 @@
+name: Rust CLI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust and coverage tools
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy --component llvm-tools-preview
+          rustup default 1.96.0
+          cargo install cargo-llvm-cov --version 0.9.1 --locked
+      - name: Format and lint
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Build release
+        run: cargo build --locked --release
+      - name: Build pinned upstream reference
+        run: bash scripts/build-reference.sh
+      - name: Tests, parity and coverage
+        run: bash scripts/coverage.sh
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          if [ -f target/coverage/summary.md ]; then
+            cat target/coverage/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage
+          path: target/coverage/
+          if-no-files-found: warn
