@@ -1,27 +1,27 @@
 # journal-rs
 
-A macOS command-line tool for reading, searching, exporting, and editing Apple Journal entries. A Rust port of [apple-journal-cli](https://github.com/omarshahine/apple-journal-cli).
+A Rust port of [apple-journal-cli](https://github.com/omarshahine/apple-journal-cli). Read, search, export, and edit Apple Journal entries from the terminal on macOS.
 
-Experimental. Tested on Apple Silicon with macOS 26. Journal.app rendering and iCloud sync after writes have not been fully verified.
+Tested on Apple Silicon with macOS 26. Writing is experimental: entries written by this tool have not been fully checked for rendering in Journal.app or syncing through iCloud.
 
 ## Install
 
-Requires Rust and Xcode Command Line Tools with the Swift compiler. From the repository directory:
+You'll need Rust and Xcode Command Line Tools, including the Swift compiler. From a checkout of this repository:
 
 ```sh
 cargo install --path . --locked
 journal-rs --help
 ```
 
-Grant your terminal access under **System Settings → Privacy & Security → Full Disk Access**. If you run the CLI through another app, that app also needs permission.
+To access your journal, give your terminal **Full Disk Access** in **System Settings → Privacy & Security**. If you run the CLI through another app, give that app access too.
 
-Default database:
+By default, it reads Apple's Journal database at:
 
 ```text
 ~/Library/Group Containers/group.com.apple.moments/Library/moments.sqlite
 ```
 
-Use `--db PATH` or `JOURNAL_DB` to select another database. `--db` takes precedence.
+To use another database, pass `--db PATH` or set `JOURNAL_DB`. If both are set, `--db` wins.
 
 ## Usage
 
@@ -34,11 +34,13 @@ journal-rs journals --json
 journal-rs export --dir ~/journal-export --format md
 ```
 
-`show` lists attachment paths and whether the files exist. `export` supports Markdown and JSON. Other commands include `stats`, `deleted`, `sandbox`, `write`, `edit`, `delete`, `restore`, `empty`, `repair-locations`, `sync-journals`, and `render`. Run `journal-rs <command> --help` for options.
+Replace `123` with an entry ID from `list`. `show` also reports attachment paths and whether the files are available locally. For JSON exports, use `--format json`.
+
+Run `journal-rs --help` for all commands, or `journal-rs <command> --help` for options.
 
 ### Writing
 
-Try a synthetic database first:
+Start with a test database:
 
 ```sh
 bash tests/upstream/make-fixture.sh /tmp/journal-demo
@@ -46,7 +48,9 @@ journal-rs --db /tmp/journal-demo/moments.sqlite \
   write --title 'Today' --body 'Coffee after a walk.'
 ```
 
-Before editing your real journal, export a backup from Journal.app and quit the app. Writes require `--live`, plus `--accept-risk` on the first use. All commands that modify entries support `--dry-run`. The CLI backs up the database and uses SQL transactions, but a local backup cannot undo changes already synced to iCloud.
+Before editing your real journal, export a backup from Journal.app and quit the app. Writing to the real database requires `--live` and, the first time, `--accept-risk`. Use `--dry-run` to preview changes.
+
+The CLI also backs up the database before a live write and applies database changes in a transaction. That backup cannot undo changes already synced to iCloud.
 
 ### Known limitations
 
@@ -57,7 +61,7 @@ Before editing your real journal, export a backup from Journal.app and quit the 
 
 ## Development
 
-The core is written in Rust. A small Swift bridge handles Apple's RTF, image resizing, and link metadata APIs. Tests use synthetic data and do not require a personal journal.
+Most of the code is Rust. The Swift bridge handles RTF, image resizing, and link metadata through Apple's frameworks. The commands below use generated test data; you don't need a personal journal to run them.
 
 ```sh
 cargo fmt --check
@@ -66,7 +70,7 @@ cargo test --locked
 bash scripts/test-upstream.sh
 ```
 
-CI also compares behavior against upstream and measures coverage. To generate a report locally:
+CI runs these checks, compares the results with the original Swift CLI, and collects coverage. To run the coverage checks locally:
 
 ```sh
 rustup component add llvm-tools-preview
@@ -75,8 +79,10 @@ bash scripts/build-reference.sh
 bash scripts/coverage.sh
 ```
 
-The HTML report is at `target/coverage/html/index.html` and excludes the Swift bridge. Image resizing tests need access to macOS ImageIO services.
+Open `target/coverage/html/index.html` for the report. Coverage does not include the Swift bridge. Image resizing tests need access to macOS ImageIO services.
 
 ## License
 
-[MIT](LICENSE), with Omar Shahine's original copyright notice retained. The port and compatibility tests use upstream commit [96f876e](https://github.com/omarshahine/apple-journal-cli/tree/96f876e4690d5b17f4ab567aa0f7498c156213c1) as their reference. This project is not affiliated with Apple.
+[MIT](LICENSE). Omar Shahine's original copyright notice is retained. This port is based on upstream commit [96f876e](https://github.com/omarshahine/apple-journal-cli/tree/96f876e4690d5b17f4ab567aa0f7498c156213c1), which is also used for compatibility tests.
+
+This project is not affiliated with Apple.
