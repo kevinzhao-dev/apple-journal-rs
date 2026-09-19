@@ -46,9 +46,9 @@ This checkout includes [AGENTS.md](AGENTS.md) and three repository skills in
 
 | Skill | Example request |
 | --- | --- |
-| `journal-recall` | 「我最近對換工作很焦慮，過去有類似經歷嗎？後來怎麼樣？」 |
-| `journal-compare` | 「比較今年和去年九月到今天，我在意的事情有什麼變化？」 |
-| `journal-themes` | 「整理去年吃過、而且日記裡明確說想再訪的餐廳。」 |
+| `journal-recall` | Find entries about similar situations and summarize their recorded outcomes. |
+| `journal-compare` | Compare recurring topics across two selected time periods. |
+| `journal-themes` | Organize entries by a selected topic, with dates and source references. |
 
 Use an agent with this repository as its workspace. You can name a skill directly
 (for example, `$journal-recall`) or ask a matching question. Agents without skill
